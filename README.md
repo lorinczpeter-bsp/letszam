@@ -1,50 +1,42 @@
 # Bábolna Sped – Sofőrlétszám
 
-Önálló Streamlit-alkalmazás Agroorg XLS/XLSX/CSV exporthoz.
-
-## Indítás
-
-Python 3.11 vagy 3.12 környezetben, a kicsomagolt könyvtárból:
+Önálló Streamlit-alkalmazás Agroorg XLS/XLSX/CSV exporthoz. Python 3.11 vagy 3.12 környezetben:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Streamlit Community Cloud esetén a teljes könyvtár tartalmát töltsd fel a saját repository-ba. A belépő fájl `app.py`. Az `assets` mappa és a két TTF betűfájl is szükséges a magyar ékezeteket helyesen megjelenítő PDF-hez. A csomag nem tartalmaz személyes bemeneti adatokat.
+Streamlit Community Cloud esetén a teljes csomagot töltsd fel a repository-ba, belépő fájl: `app.py`. Az `assets` betűfájljai is szükségesek. A csomag nem tartalmaz személyes bemeneti adatokat.
 
 ## Használat
 
-1. Töltsd fel a változtatás nélküli Agroorg-exportot.
-2. Ellenőrizd a fájlnév alapján felajánlott elszámolási hónapot.
-3. Kizárólag a 8417 FEOR-kódú dolgozók kerülnek a listába és az exportokba. A nem nulla keresetű dolgozók Nemzetközisként indulnak. A 0 keresetűek külön, nem szerkeszthető listában láthatók, kötelező Kihagyás besorolással. A táblázat Besorolás oszlopában módosítsd a kivételeket. A forrás esetleges korábbi N/B/H/O oszlopát az alkalmazás szándékosan nem használja.
-4. Korábbi alkalmazás-exportból opcionálisan töltsd vissza a besorolásokat. Ez az összes jelenlegi besorolást lecseréli a törzsszám szerint egyező mentett értékekre. Az új, nem nulla keresetű személyek Nemzetközisként indulnak. Az aktuális havi nulla kereset felülírja a mentett besorolást. A korábbi automatikus nullás kizárás nem kerül át egy nem nullás hónapra.
-5. Az eredmények azonnal frissülnek. A kihagyottak nem számítanak bele. A nullás létszámú besorolt személyek külön személyszámban követhetők.
-6. Ellenőrzés után töltsd le az Excel- és PDF-kimutatást. Az Excel egyúttal a besorolások mentése is, később visszatölthető.
+1. Töltsd fel a változtatás nélküli Agroorg-exportot és ellenőrizd a hónapot.
+2. Minden dolgozó megjelenik. A 8417 FEOR-kódú, nem nulla keresetű személy alapbesorolása Nemzetközis. Más FEOR esetén Kihagyás: ezt módosíthatod, ha az illető sofőrként dolgozott.
+3. A 0 keresetűek külön listában jelennek meg. Besorolásuk mindig „0 Ft kereset”, nem módosítható, nem számítanak bele a létszámba. A Megjegyzés mezőben rögzíthető a távollét oka, legfeljebb 500 karakterrel. Az alkalmazás nem következtet a távollét okára.
+4. A korábbi Excel-exportból törzsszám alapján visszatölthetők a besorolások. A régi „Váltó / Ónódi” értéket „Ónódi”-ként veszi át. Az aktuális hónap nulla keresete mindig felülírja a visszatöltött besorolást. Korábbi automatikus nullás kizárás után az új hónap alapbesorolása a FEOR alapján áll vissza.
+5. A megjegyzések az Excel-exportban megmaradnak, és ugyanarra a hónapra visszatölthetők. Más hónap megjegyzését nem veszi át a program.
+6. Az Excel- és PDF-export az aktuális felületi állapotból készül.
 
-## Számítási szabályok
+## Számítás
 
-- Nemzetközis: alaplétszám × 1 a nemzetközi létszámba.
-- Belföldes: alaplétszám × 1 a belföldi létszámba.
+- Nemzetközis: alaplétszám × 1 nemzetközi.
+- Belföldes: alaplétszám × 1 belföldi.
 - Hibrid: alaplétszám × 0,8 nemzetközi és × 0,2 belföldi.
-- Váltó / Ónódi: alaplétszám × 0,625 nemzetközi.
-- 4-kezes: alaplétszám × 0,75 nemzetközi. Két teljes létszámú sofőr együtt 1,5 fő.
-- Kihagyás: egyik létszámba sem kerül.
+- Ónódi: alaplétszám × 0,625 nemzetközi.
+- 4-kezes: alaplétszám × 0,75 nemzetközi. Két teljes alaplétszámú sofőr együtt 1,5 fő.
+- Kihagyás és 0 Ft kereset: nem számítanak bele.
 
-A súlyozott létszám nem a személyek darabszáma. A program az Agroorg `letsz` mezőjét veszi alapul, ezt nem számítja újra a belépési/kilépési dátumokból. Csak megjelenítéskor kerekít négy tizedesre.
+A számítás alapja az Agroorg `letsz` mezője. A súlyozott létszám nem a személyek darabszáma. A köztes értékeket nem kerekíti a program; megjelenítéskor négy tizedest használ.
 
-Az import név szerint azonosítja a `torzsszam`, `nev`, `letsz` , `feorkód` és `kereset` oszlopokat. Hiányzó vagy hibás kereset nem minősül nullának, feldolgozási hibát okoz. Hibás létszám, hiányzó név/törzsszám vagy ismétlődő törzsszám esetén megáll, nem hagy ki sorokat észrevétlenül. Több jogviszonyú személyek összevonása nem automatikus.
+Kötelező oszlopok: `torzsszam`, `nev`, `letsz`, `feorkód`, `kereset`. Hibás létszám vagy kereset, hiányzó név/törzsszám és ismétlődő törzsszám esetén megáll a feldolgozás. A hiányzó kereset nem nulla. Az eredeti fájl kézi besorolási oszlopát nem használja.
 
-## Export és megőrzés
+## Export
 
-Az Excel Összesítés, Részletezés, Kihagyottak és Besorolások munkalapokat tartalmaz. A Besorolások lap szerkesztéséből képletekkel frissül a Részletezés és az Összesítés. A Kihagyottak lap exportáláskori pillanatkép. Az alkalmazásba visszatöltött Excelből csak a törzsszámhoz kapcsolt besorolást vesszük át; az alaplétszám mindig az aktuális Agroorg-exportból származik.
+Az Excel lapjai: Összesítés, Részletezés, Kihagyottak, Besorolások. A Besorolások szerkesztése képletekkel frissíti a Részletezést és az Összesítést. A nulla kereset mellett átírt besorolás nem változtatja meg a számítást. A Kihagyottak lap az exportáláskori pillanatkép. A megjegyzések az Excelben és a PDF-ben is megjelennek.
 
-A PDF ismétlődő táblázatfejlécekkel és külön kihagyott-listával készül. Az exportok színei: #2A3756, #F2E47D, #D1D5DB, #FFFFFF. Excel: Calibri; PDF: beágyazott DejaVu Sans az ékezetek hordozható megjelenítéséhez.
+Minden névrész nagy kezdőbetűvel, a többi betű kisbetűvel jelenik meg. Az egyeztetés továbbra is törzsszám alapján történik.
 
-Nincs automatikus szerveroldali tartós személyadat-tárolás. A böngésző munkamenetének elvesztésekor a nem exportált módosítások elveszhetnek. A havi Excel-exportokat őrizd meg, így a korábbi hónapok állapota külön fájlban megmarad.
+Arculati színek: #2A3756, #F2E47D, #D1D5DB, #FFFFFF. Excel: Calibri. PDF: beágyazott DejaVu Sans.
 
-Hivatalos API-dokumentáció: https://docs.streamlit.io/develop/api-reference/data/st.data_editor
-
-## Kötelező kizárás
-
-A 0 keresetű, 8417 FEOR-kódú dolgozók a felületen külön, zárolt listában, az Excel és PDF exportban a kihagyottak között is megjelennek, „0 kereset miatt kihagyva” megjelöléssel. A szabály a számítás és az export során, illetve régi besorolások visszatöltésekor is érvényes. Az Excel számítási képletei nulla kereset mellett nem veszik figyelembe az esetleg átírt besorolást. Más FEOR-kódú dolgozók egyik személylistában vagy exportban sem szerepelnek. A nulla keresetből nem állapítjuk meg a távollét okát.
+Nincs automatikus tartós szerveroldali mentés. A havi Excel-exportot őrizd meg: ez tárolja a besorolásokat és a megjegyzéseket is.
