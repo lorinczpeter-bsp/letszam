@@ -28,6 +28,7 @@ Streamlit Community Cloud esetén a teljes könyvtár tartalmát töltsd fel a s
 - Belföldes: alaplétszám × 1 a belföldi létszámba.
 - Hibrid: alaplétszám × 0,8 nemzetközi és × 0,2 belföldi.
 - Váltó / Ónódi: alaplétszám × 0,625 nemzetközi.
+- 4-kezes: alaplétszám × 0,75 nemzetközi. Két teljes létszámú sofőr együtt 1,5 fő.
 - Kihagyás: egyik létszámba sem kerül.
 
 A súlyozott létszám nem a személyek darabszáma. A program az Agroorg `letsz` mezőjét veszi alapul, ezt nem számítja újra a belépési/kilépési dátumokból. Csak megjelenítéskor kerekít négy tizedesre.

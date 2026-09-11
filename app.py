@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 
 BLUE, YELLOW, GRAY, WHITE = '#2A3756', '#F2E47D', '#D1D5DB', '#FFFFFF'
-CATEGORIES = ['Nemzetközis', 'Belföldes', 'Hibrid', 'Váltó / Ónódi', 'Kihagyás']
+CATEGORIES = ['Nemzetközis', 'Belföldes', 'Hibrid', 'Váltó / Ónódi', '4-kezes', 'Kihagyás']
 FACTORS = {'Nemzetközis': (1., 0.), 'Belföldes': (0., 1.),
-           'Hibrid': (.8, .2), 'Váltó / Ónódi': (.625, 0.), 'Kihagyás': (0., 0.)}
+           'Hibrid': (.8, .2), 'Váltó / Ónódi': (.625, 0.), '4-kezes': (.75, 0.), 'Kihagyás': (0., 0.)}
 BASE_COLUMNS = ['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Besorolás']
 EXTRA_COLUMNS = ['Kereset', 'Kihagyás oka']
 ZERO_REASON = '0 kereset miatt kihagyva'
@@ -179,7 +179,7 @@ def excel_export(frame, month, source):
         detail.write_formula(i, 4, f'IF(J{r}=0,"Kihagyás",\'Besorolások\'!E{r})', normal, row['Besorolás'])
         detail.write_formula(i, 9, f"='Besorolások'!F{r}", money, row['Kereset'])
         detail.write_formula(i, 10, f'IF(J{r}=0,"{ZERO_REASON}",IF(E{r}="Kihagyás","Kézi kihagyás",""))', normal, row['Kihagyás oka'])
-        detail.write_formula(i, 5, f'IF(E{r}="Nemzetközis",1,IF(E{r}="Hibrid",0.8,IF(E{r}="Váltó / Ónódi",0.625,0)))', number, row['N szorzó'])
+        detail.write_formula(i, 5, f'IF(E{r}="Nemzetközis",1,IF(E{r}="Hibrid",0.8,IF(E{r}="Váltó / Ónódi",0.625,IF(E{r}="4-kezes",0.75,0))))', number, row['N szorzó'])
         detail.write_formula(i, 6, f'IF(E{r}="Belföldes",1,IF(E{r}="Hibrid",0.2,0))', number, row['B szorzó'])
         detail.write_formula(i, 7, f'D{r}*F{r}', number, row['Nemzetközi'])
         detail.write_formula(i, 8, f'D{r}*G{r}', number, row['Belföldi'])
@@ -208,7 +208,7 @@ def excel_export(frame, month, source):
     summary.write('A16', 'Ebből 0 kereset miatt kihagyva', normal)
     summary.write_formula('B16', f'COUNTIF(\'Részletezés\'!J2:J{end},0)', normal, int(frame['Kereset'].eq(0).sum()))
     for i, line in enumerate(['Mértékegység: fő. A súlyozott létszám nem személyek darabszáma.',
-                             'Hibrid: 80% nemzetközi, 20% belföldi. Váltó: 62,5% nemzetközi.',
+                             'Hibrid: 80% nemzetközi, 20% belföldi. Váltó: 62,5%. 4-kezes: 75% nemzetközi.',
                              'A Besorolások lap szerkesztése frissíti a Részletezést és az Összesítést.',
                              'A Kihagyottak lap az exportáláskori állapotot rögzíti.'], 17):
         summary.merge_range(i, 0, i, 4, line, normal)
@@ -257,7 +257,7 @@ def pdf_export(frame, month, source):
     story += [p(f'8417 FEOR-kódú személyek: {len(frame)} | Besorolt: {included.sum()} | '
                 f'Pozitív alaplétszámú besorolt: {(included & frame["Alaplétszám"].gt(0)).sum()} | Kihagyott: {(~included).sum()}'),
               p(f'0 kereset miatt kötelezően kihagyva: {frame["Kereset"].eq(0).sum()} személy. Más FEOR-kódú dolgozók nem szerepelnek a kimutatásban.'),
-              p('A súlyozott létszám nem azonos a személyek számával. Hibrid: 80% nemzetközi, 20% belföldi. Váltó / Ónódi: 62,5% nemzetközi. A számítás a forrás létszámértékeiből történik, kerekítés csak a megjelenítésnél.')]
+              p('A súlyozott létszám nem azonos a személyek számával. Hibrid: 80% nemzetközi, 20% belföldi. Váltó / Ónódi: 62,5% nemzetközi. 4-kezes: 75% nemzetközi. A számítás a forrás létszámértékeiből történik, kerekítés csak a megjelenítésnél.')]
     for label, subset in [('Besorolt személyek', frame[included]), ('Kihagyott személyek', frame[~included])]:
         story.append(Paragraph(label, heading))
         if subset.empty:
@@ -316,9 +316,9 @@ def main():
         base = enforce_rules(st.session_state['base'])
         zero_rows = base.loc[base['Kereset'].eq(0)].copy()
         active_rows = base.loc[base['Kereset'].ne(0)].copy()
-        edited_active = st.data_editor(active_rows, hide_index=True, width='stretch', height=520,
+        edited_active = st.data_editor(active_rows.drop(columns=['Kihagyás oka']), hide_index=True, width='stretch', height=520,
                                key=f'editor_{fingerprint}_{st.session_state["revision"]}',
-                               disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Kereset', 'Kihagyás oka'],
+                               disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Kereset'],
                                column_config={'Besorolás': st.column_config.SelectboxColumn('Besorolás', options=CATEGORIES, required=True),
                                               'Alaplétszám': st.column_config.NumberColumn(format='%.4f'),
                                               'Kereset': st.column_config.NumberColumn(format='%.2f')})
@@ -337,7 +337,7 @@ def main():
         included = edited['Besorolás'].ne('Kihagyás')
         st.caption(f'8417 FEOR: {len(edited)} személy • Besorolt: {included.sum()} • Pozitív alaplétszámú besorolt: '
                    f'{(included & edited["Alaplétszám"].gt(0)).sum()} • Kihagyott: {(~included).sum()}')
-        st.caption('Hibrid: 80% nemzetközi, 20% belföldi. Váltó / Ónódi: 62,5% nemzetközi. A köztes értékeket nem kerekítjük.')
+        st.caption('Hibrid: 80% nemzetközi, 20% belföldi. Váltó / Ónódi: 62,5% nemzetközi. 4-kezes: 75% nemzetközi. A köztes értékeket nem kerekítjük.')
         with st.expander('Számítás részletei'):
             st.dataframe(calculated, hide_index=True, width='stretch')
         st.subheader('Export')
