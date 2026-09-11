@@ -14,6 +14,8 @@ CATEGORIES = ['Nemzetközis', 'Belföldes', 'Hibrid', 'Váltó / Ónódi', 'Kiha
 FACTORS = {'Nemzetközis': (1., 0.), 'Belföldes': (0., 1.),
            'Hibrid': (.8, .2), 'Váltó / Ónódi': (.625, 0.), 'Kihagyás': (0., 0.)}
 BASE_COLUMNS = ['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Besorolás']
+EXTRA_COLUMNS = ['Kereset', 'Kihagyás oka']
+ZERO_REASON = '0 kereset miatt kihagyva'
 
 
 def identifier(value):
@@ -42,19 +44,27 @@ def read_source(data, filename):
     else:
         raise ValueError('XLS, XLSX vagy CSV fájlt tölts fel.')
     raw.columns = [str(c).strip().lower() for c in raw.columns]
-    required = ['torzsszam', 'nev', 'letsz']
+    required = ['torzsszam', 'nev', 'letsz', 'feorkód', 'kereset']
     missing = [c for c in required if c not in raw.columns]
     if missing:
         raise ValueError('Hiányzó Agroorg-oszlop: ' + ', '.join(missing))
     raw = raw.dropna(how='all').reset_index(drop=True)
     if raw.empty:
         raise ValueError('A fájl nem tartalmaz személyeket.')
+    # Más munkakörök személyei egyetlen listába vagy exportba sem kerülnek.
+    raw = raw.loc[raw['feorkód'].map(identifier).eq('8417')].copy()
     amounts = pd.to_numeric(raw['letsz'].astype(str).str.replace('\u00a0', '', regex=False)
                             .str.replace(' ', '', regex=False).str.replace(',', '.', regex=False), errors='coerce')
     invalid = amounts.isna() | ~np.isfinite(amounts) | (amounts < 0)
     if invalid.any():
         rows = ', '.join(str(i + 2) for i in raw.index[invalid])
         raise ValueError(f'Hiányzó, hibás vagy negatív létszámérték. Excel-sorok: {rows}. Javítsd a forrást.')
+    earnings = pd.to_numeric(raw['kereset'].astype(str).str.replace('\u00a0', '', regex=False)
+                             .str.replace(' ', '', regex=False).str.replace(',', '.', regex=False), errors='coerce')
+    invalid_earnings = earnings.isna() | ~np.isfinite(earnings)
+    if invalid_earnings.any():
+        rows = ', '.join(str(i + 2) for i in raw.index[invalid_earnings])
+        raise ValueError(f'Hiányzó vagy hibás kereset. Excel-sorok: {rows}. A hiányzó adat nem tekinthető nullának.')
     ids = raw['torzsszam'].map(identifier)
     names = raw['nev'].fillna('').astype(str).str.strip()
     if ids.eq('').any() or names.eq('').any():
@@ -62,9 +72,23 @@ def read_source(data, filename):
     if ids.duplicated().any():
         raise ValueError('Ismétlődő törzsszám: ' + ', '.join(ids[ids.duplicated()].unique()) +
                          '. Az eltérő jogviszonyok összesítését ellenőrizni kell.')
-    feor = raw['feorkód'].map(identifier) if 'feorkód' in raw else pd.Series('', index=raw.index)
-    return pd.DataFrame({'Törzsszám': ids, 'Név': names, 'FEOR': feor,
-                         'Alaplétszám': amounts, 'Besorolás': 'Nemzetközis'}).sort_values('Név').reset_index(drop=True)
+    feor = raw['feorkód'].map(identifier)
+    result = pd.DataFrame({'Törzsszám': ids, 'Név': names, 'FEOR': feor,
+                           'Alaplétszám': amounts, 'Besorolás': 'Nemzetközis',
+                           'Kereset': earnings, 'Kihagyás oka': ''}).sort_values('Név').reset_index(drop=True)
+    return enforce_rules(result)
+
+
+def enforce_rules(frame):
+    """A kötelező kizárás import, visszatöltés, számítás és export során is érvényes."""
+    result = frame.loc[frame['FEOR'].map(identifier).eq('8417')].copy()
+    if result['Kereset'].isna().any() or not np.isfinite(result['Kereset']).all():
+        raise ValueError('Hiányzó vagy hibás kereset.')
+    zero = result['Kereset'].eq(0)
+    result.loc[zero, 'Besorolás'] = 'Kihagyás'
+    result['Kihagyás oka'] = np.where(zero, ZERO_REASON,
+                                    np.where(result['Besorolás'].eq('Kihagyás'), 'Kézi kihagyás', ''))
+    return result
 
 
 def suggested_month(filename):
@@ -82,13 +106,18 @@ def restore_categories(data, current):
         raise ValueError('A mentett besorolások törzsszámai hiányosak vagy ismétlődnek.')
     if not saved['Besorolás'].isin(CATEGORIES).all():
         raise ValueError('Ismeretlen kategória található a mentett besorolásokban.')
+    # Az előző hónap automatikus nullás kizárása nem válik tartós kézi kizárássá.
+    if 'Kihagyás oka' in saved:
+        saved.loc[saved['Kihagyás oka'].eq(ZERO_REASON), 'Besorolás'] = 'Nemzetközis'
     mapping = saved.set_index('Törzsszám')['Besorolás']
     result = current.copy()
     result['Besorolás'] = result['Törzsszám'].map(mapping).fillna('Nemzetközis')
+    result = enforce_rules(result)
     return result, int(result['Törzsszám'].isin(mapping.index).sum())
 
 
 def calculate(frame):
+    frame = enforce_rules(frame)
     if not frame['Besorolás'].isin(CATEGORIES).all():
         raise ValueError('Minden személynél válassz érvényes besorolást.')
     result = frame.copy()
@@ -108,6 +137,7 @@ def excel_export(frame, month, source):
                                       'strings_to_urls': False})
     normal = book.add_format({'font_name': 'Calibri', 'font_size': 11, 'font_color': BLUE})
     number = book.add_format({'font_name': 'Calibri', 'num_format': '0.0000', 'font_color': BLUE})
+    money = book.add_format({'font_name': 'Calibri', 'num_format': '#,##0.00', 'font_color': BLUE})
     head = book.add_format({'font_name': 'Calibri', 'bold': True, 'bg_color': BLUE,
                            'font_color': WHITE, 'text_wrap': True, 'valign': 'vcenter'})
     total = book.add_format({'font_name': 'Calibri', 'bold': True, 'bg_color': YELLOW,
@@ -122,19 +152,22 @@ def excel_export(frame, month, source):
         sheet.set_default_row(21)
         sheet.set_column('A:A', 16, normal)
         sheet.set_column('B:B', 34, normal)
-        sheet.set_column('C:I', 18, normal)
+        sheet.set_column('C:K', 18, normal)
         sheet.set_landscape()
         sheet.fit_to_pages(1, 0)
     # A besorolások munkalap az exportból történő visszatöltéshez is használható.
-    settings.write_row(0, 0, BASE_COLUMNS, head)
+    settings.write_row(0, 0, BASE_COLUMNS + EXTRA_COLUMNS, head)
+    settings.set_column('G:G', 30, normal)
     settings.set_row(0, 32)
-    for i, row in enumerate(frame[BASE_COLUMNS].itertuples(index=False, name=None), 1):
+    for i, row in enumerate(frame[BASE_COLUMNS + EXTRA_COLUMNS].itertuples(index=False, name=None), 1):
         settings.write_row(i, 0, row, normal)
         settings.write_number(i, 3, row[3], number)
+        settings.write_number(i, 5, row[5], money)
     settings.data_validation(1, 4, len(frame), 4, {'validate': 'list', 'source': CATEGORIES})
     settings.freeze_panes(1, 2)
-    settings.autofilter(0, 0, len(frame), 4)
-    headers = BASE_COLUMNS + ['N szorzó', 'B szorzó', 'Nemzetközi', 'Belföldi']
+    settings.autofilter(0, 0, len(frame), 6)
+    headers = BASE_COLUMNS + ['N szorzó', 'B szorzó', 'Nemzetközi', 'Belföldi'] + EXTRA_COLUMNS
+    detail.set_column('K:K', 30, normal)
     detail.write_row(0, 0, headers, head)
     detail.set_row(0, 32)
     for i, (_, row) in enumerate(frame.iterrows(), 1):
@@ -142,12 +175,16 @@ def excel_export(frame, month, source):
         for j, col in enumerate(BASE_COLUMNS):
             detail.write_formula(i, j, f"='Besorolások'!{chr(65+j)}{r}",
                                  number if j == 3 else normal, row[col])
+        # Kereset=0 esetén az Excelben átírt besorolás sem változtathatja meg a számítást.
+        detail.write_formula(i, 4, f'IF(J{r}=0,"Kihagyás",\'Besorolások\'!E{r})', normal, row['Besorolás'])
+        detail.write_formula(i, 9, f"='Besorolások'!F{r}", money, row['Kereset'])
+        detail.write_formula(i, 10, f'IF(J{r}=0,"{ZERO_REASON}",IF(E{r}="Kihagyás","Kézi kihagyás",""))', normal, row['Kihagyás oka'])
         detail.write_formula(i, 5, f'IF(E{r}="Nemzetközis",1,IF(E{r}="Hibrid",0.8,IF(E{r}="Váltó / Ónódi",0.625,0)))', number, row['N szorzó'])
         detail.write_formula(i, 6, f'IF(E{r}="Belföldes",1,IF(E{r}="Hibrid",0.2,0))', number, row['B szorzó'])
         detail.write_formula(i, 7, f'D{r}*F{r}', number, row['Nemzetközi'])
         detail.write_formula(i, 8, f'D{r}*G{r}', number, row['Belföldi'])
     detail.freeze_panes(1, 2)
-    detail.autofilter(0, 0, len(frame), 8)
+    detail.autofilter(0, 0, len(frame), 10)
     detail.repeat_rows(0)
     end = len(frame) + 1
     summary.set_column('A:A', 44, normal)
@@ -160,7 +197,7 @@ def excel_export(frame, month, source):
         summary.write_formula(i, 1, f"SUM('Részletezés'!{col}2:{col}{end})", total, value)
     summary.write('A10', 'Összes súlyozott létszám', total)
     summary.write_formula('B10', 'SUM(B8:B9)', total, frame[['Nemzetközi', 'Belföldi']].sum().sum())
-    summary.write_row('A12', ['Forrásban szereplő személyek', len(frame)], normal)
+    summary.write_row('A12', ['8417 FEOR-kódú személyek', len(frame)], normal)
     summary.write('A13', 'Besorolt személyek (nullás értékkel is)', normal)
     summary.write_formula('B13', f'COUNTIF(\'Részletezés\'!E2:E{end},"<>Kihagyás")', normal, int(frame['Besorolás'].ne('Kihagyás').sum()))
     summary.write('A14', 'Pozitív alaplétszámú besorolt személyek', normal)
@@ -168,15 +205,20 @@ def excel_export(frame, month, source):
                           int((frame['Besorolás'].ne('Kihagyás') & frame['Alaplétszám'].gt(0)).sum()))
     summary.write('A15', 'Kihagyott személyek', normal)
     summary.write_formula('B15', f'COUNTIF(\'Részletezés\'!E2:E{end},"Kihagyás")', normal, int(frame['Besorolás'].eq('Kihagyás').sum()))
+    summary.write('A16', 'Ebből 0 kereset miatt kihagyva', normal)
+    summary.write_formula('B16', f'COUNTIF(\'Részletezés\'!J2:J{end},0)', normal, int(frame['Kereset'].eq(0).sum()))
     for i, line in enumerate(['Mértékegység: fő. A súlyozott létszám nem személyek darabszáma.',
                              'Hibrid: 80% nemzetközi, 20% belföldi. Váltó: 62,5% nemzetközi.',
                              'A Besorolások lap szerkesztése frissíti a Részletezést és az Összesítést.',
                              'A Kihagyottak lap az exportáláskori állapotot rögzíti.'], 17):
         summary.merge_range(i, 0, i, 4, line, normal)
-    skipped.write_row(0, 0, BASE_COLUMNS, head)
-    for i, row in enumerate(frame.loc[frame['Besorolás'].eq('Kihagyás'), BASE_COLUMNS].itertuples(index=False, name=None), 1):
+    summary.merge_range('A22:E22', 'Csak 8417 FEOR. Kereset = 0: kötelező kihagyás, látható személy.', normal)
+    skipped.write_row(0, 0, BASE_COLUMNS + EXTRA_COLUMNS, head)
+    skipped.set_column('G:G', 30, normal)
+    for i, row in enumerate(frame.loc[frame['Besorolás'].eq('Kihagyás'), BASE_COLUMNS + EXTRA_COLUMNS].itertuples(index=False, name=None), 1):
         skipped.write_row(i, 0, row, normal)
         skipped.write_number(i, 3, row[3], number)
+        skipped.write_number(i, 5, row[5], money)
     book.close()
     return output.getvalue()
 
@@ -212,8 +254,9 @@ def pdf_export(frame, month, source):
                                ('TOPPADDING', (0, 0), (-1, -1), 9), ('BOTTOMPADDING', (0, 0), (-1, -1), 9)]))
     story += [table, Spacer(1, 10)]
     included = frame['Besorolás'].ne('Kihagyás')
-    story += [p(f'Személyek a forrásban: {len(frame)} | Besorolt: {included.sum()} | '
+    story += [p(f'8417 FEOR-kódú személyek: {len(frame)} | Besorolt: {included.sum()} | '
                 f'Pozitív alaplétszámú besorolt: {(included & frame["Alaplétszám"].gt(0)).sum()} | Kihagyott: {(~included).sum()}'),
+              p(f'0 kereset miatt kötelezően kihagyva: {frame["Kereset"].eq(0).sum()} személy. Más FEOR-kódú dolgozók nem szerepelnek a kimutatásban.'),
               p('A súlyozott létszám nem azonos a személyek számával. Hibrid: 80% nemzetközi, 20% belföldi. Váltó / Ónódi: 62,5% nemzetközi. A számítás a forrás létszámértékeiből történik, kerekítés csak a megjelenítésnél.')]
     for label, subset in [('Besorolt személyek', frame[included]), ('Kihagyott személyek', frame[~included])]:
         story.append(Paragraph(label, heading))
@@ -223,7 +266,10 @@ def pdf_export(frame, month, source):
         columns = ['Törzsszám', 'Név', 'Besorolás', 'Alaplétszám', 'Nemzetközi', 'Belföldi']
         rows = [[Paragraph(c, white) for c in columns]]
         for _, row in subset.iterrows():
-            rows.append([p(fmt(row[c]) if c in columns[3:] else row[c]) for c in columns])
+            cells = [p(fmt(row[c]) if c in columns[3:] else row[c]) for c in columns]
+            if row['Kihagyás oka']:
+                cells[2] = p(row['Kihagyás oka'])
+            rows.append(cells)
         t = Table(rows, colWidths=[66, 149, 97, 73, 73, 73], repeatRows=1, hAlign='LEFT')
         t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(BLUE)),
                               ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -242,20 +288,23 @@ def main():
     st.caption('Bábolna Sped Kft. • Agroorg havi létszámkimutatás')
     uploaded = st.file_uploader('Agroorg-export feltöltése', type=['xls', 'xlsx', 'csv'])
     if uploaded is None:
-        st.info('Töltsd fel a havi Agroorg-exportot. Minden személy Nemzetközis besorolással indul.')
+        st.info('Töltsd fel a havi Agroorg-exportot. Csak a 8417 FEOR-kódú dolgozók jelennek meg. A 0 keresetűek láthatók maradnak, de kimaradnak a számításból.')
         return
     data = uploaded.getvalue()
-    fingerprint = sha256(data + uploaded.name.encode()).hexdigest()
+    fingerprint = sha256(b'v2-feor-earnings' + data + uploaded.name.encode()).hexdigest()
     try:
         if st.session_state.get('source_id') != fingerprint:
             st.session_state['base'] = read_source(data, uploaded.name)
             st.session_state['source_id'] = fingerprint
             st.session_state['revision'] = 0
             st.session_state['period'] = suggested_month(uploaded.name)
+        if st.session_state['base'].empty:
+            st.info('A fájlban nincs 8417 FEOR-kódú dolgozó.')
+            return
         period = st.date_input('Elszámolási hónap – a kiválasztott dátum hónapja számít', key='period')
         month = period.strftime('%Y-%m')
         with st.expander('Korábbi besorolások visszatöltése'):
-            st.write('Válaszd ki az alkalmazás korábbi Excel-exportját. Csak a besorolásokat vesszük át törzsszám alapján. Az új személyek Nemzetközisként indulnak.')
+            st.write('Csak a besorolásokat vesszük át törzsszám alapján. Az új személyek Nemzetközisként indulnak. Az aktuális havi 0 kereset mindig kötelező kihagyás. A korábbi automatikus nullás kizárást nem visszük át egy nem nullás hónapra.')
             previous = st.file_uploader('Korábbi Excel-export', type=['xlsx'], key='previous')
             if st.button('Besorolások visszatöltése', disabled=previous is None):
                 restored, count = restore_categories(previous.getvalue(), st.session_state['base'])
@@ -263,12 +312,22 @@ def main():
                 st.session_state['revision'] += 1
                 st.success(f'{count} személy besorolása visszatöltve.')
         st.subheader('Személyenkénti besorolás')
-        st.info('Minden személy Nemzetközisként indul, a munkakörtől függetlenül. A számításból kizárandó munkatársaknál válaszd a Kihagyást. A FEOR csak tájékoztató adat.')
-        edited = st.data_editor(st.session_state['base'], hide_index=True, width='stretch', height=520,
+        st.info('Csak 8417 FEOR-kódú dolgozók. A nem nulla keresetűek alapbesorolása Nemzetközis. A 0 keresetűek alább, külön listában láthatók; besorolásuk kötelező Kihagyás.')
+        base = enforce_rules(st.session_state['base'])
+        zero_rows = base.loc[base['Kereset'].eq(0)].copy()
+        active_rows = base.loc[base['Kereset'].ne(0)].copy()
+        edited_active = st.data_editor(active_rows, hide_index=True, width='stretch', height=520,
                                key=f'editor_{fingerprint}_{st.session_state["revision"]}',
-                               disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám'],
+                               disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Kereset', 'Kihagyás oka'],
                                column_config={'Besorolás': st.column_config.SelectboxColumn('Besorolás', options=CATEGORIES, required=True),
-                                              'Alaplétszám': st.column_config.NumberColumn(format='%.4f')})
+                                              'Alaplétszám': st.column_config.NumberColumn(format='%.4f'),
+                                              'Kereset': st.column_config.NumberColumn(format='%.2f')})
+        st.subheader(f'0 kereset miatt kihagyva – {len(zero_rows)} személy')
+        if zero_rows.empty:
+            st.caption('Nincs 0 keresetű, 8417 FEOR-kódú dolgozó.')
+        else:
+            st.dataframe(zero_rows, hide_index=True, width='stretch')
+        edited = enforce_rules(pd.concat([edited_active, zero_rows]).sort_values('Név').reset_index(drop=True))
         calculated = calculate(edited)
         st.subheader('Eredmény')
         n, b, total = st.columns(3)
@@ -276,7 +335,7 @@ def main():
         b.metric('Belföldi súlyozott létszám', f'{calculated["Belföldi"].sum():.4f}'.replace('.', ',') + ' fő')
         total.metric('Összes súlyozott létszám', f'{calculated[["Nemzetközi", "Belföldi"]].sum().sum():.4f}'.replace('.', ',') + ' fő')
         included = edited['Besorolás'].ne('Kihagyás')
-        st.caption(f'Forrás: {len(edited)} személy • Besorolt: {included.sum()} • Pozitív alaplétszámú besorolt: '
+        st.caption(f'8417 FEOR: {len(edited)} személy • Besorolt: {included.sum()} • Pozitív alaplétszámú besorolt: '
                    f'{(included & edited["Alaplétszám"].gt(0)).sum()} • Kihagyott: {(~included).sum()}')
         st.caption('Hibrid: 80% nemzetközi, 20% belföldi. Váltó / Ónódi: 62,5% nemzetközi. A köztes értékeket nem kerekítjük.')
         with st.expander('Számítás részletei'):
