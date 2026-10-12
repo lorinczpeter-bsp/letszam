@@ -17,6 +17,63 @@ BASE_COLUMNS = ['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Besorolás']
 EXTRA_COLUMNS = ['Kereset', 'Kihagyás oka', 'Megjegyzés']
 EXCLUDED = ['Kihagyás', '0 Ft kereset']
 ZERO_REASON = '0 kereset miatt kihagyva'
+GROUPS = ['Belföldes', 'Nemzetközis', 'Hibrid', 'Ónódi', '4-kezes', 'Nem számolt']
+
+
+def grouped(frame):
+    counted = ~frame['Besorolás'].isin(EXCLUDED) & frame['Alaplétszám'].gt(0)
+    return [(name, frame.loc[~counted if name == 'Nem számolt' else counted & frame['Besorolás'].eq(name)])
+            for name in GROUPS]
+
+
+def employment_date(value):
+    if pd.isna(value) or str(value).strip() in ('', '0', '0.0'):
+        return pd.NaT
+    if isinstance(value, (int, float, np.number)):
+        return pd.to_datetime(value, unit='D', origin='1899-12-30', errors='coerce')
+    text = str(value).strip()
+    return pd.to_datetime(text, dayfirst=not bool(re.match(r'^\d{4}[-./]', text)), errors='coerce')
+
+
+def audit(frame, month):
+    """Dátumokból kizárólag összehasonlítás: a forráslétszámot nem arányosítjuk újra."""
+    start = pd.Timestamp(month + '-01')
+    end = start + pd.offsets.MonthEnd(0)
+    issues = []
+    for _, row in frame.iterrows():
+        begin = employment_date(row.get('Belépés', ''))
+        finish = employment_date(row.get('Kilépés', ''))
+        notes = []
+        ratio = None
+        if row['Alaplétszám'] > 1:
+            notes.append('1 fő feletti alaplétszám – ellenőrizendő')
+        if row['Kereset'] < 0:
+            notes.append('Negatív kereset – korrekció lehet, nem automatikus kihagyás')
+        if row['Kereset'] != 0 and row['Alaplétszám'] == 0:
+            notes.append('Van kereset, de nulla alaplétszám; a hozzájárulás nulla')
+        if row.get('Dátumhiba', ''):
+            notes.append(row['Dátumhiba'])
+        if pd.notna(begin) and pd.notna(finish) and finish < begin:
+            notes.append('Kilépés a belépés előtt')
+        elif pd.notna(begin):
+            overlap = max(0, (min(end, finish) - max(start, begin)).days + 1) if pd.notna(finish) else max(0, (end - max(start, begin)).days + 1)
+            ratio = overlap / end.day
+            if overlap == 0 and row['Alaplétszám'] > 0:
+                notes.append('A jogviszony nem érinti ezt a hónapot, mégis pozitív az alaplétszám')
+            elif (start < begin <= end or pd.notna(finish) and start <= finish < end):
+                if abs(row['Alaplétszám'] - ratio) > 0.00011:
+                    notes.append('Hóközi be-/kilépés: a naptári arány eltér az Agroorg-értéktől; nem feltétlenül hiba')
+                else:
+                    notes.append('Hóközi be-/kilépés: az alaplétszám egyezik a naptári aránnyal')
+        elif pd.notna(finish) and finish < start and row['Alaplétszám'] > 0:
+            notes.append('Hónap előtti kilépés mellett pozitív alaplétszám')
+        if notes:
+            issues.append({'Törzsszám': row['Törzsszám'], 'Név': row['Név'],
+                           'Belépés': '' if pd.isna(begin) else begin.strftime('%Y-%m-%d'),
+                           'Kilépés': '' if pd.isna(finish) else finish.strftime('%Y-%m-%d'),
+                           'Alaplétszám': row['Alaplétszám'], 'Naptári arány': ratio,
+                           'Ellenőrzés': '; '.join(notes)})
+    return pd.DataFrame(issues)
 
 
 def identifier(value):
@@ -74,7 +131,18 @@ def read_source(data, filename):
     feor = raw['feorkód'].map(identifier)
     result = pd.DataFrame({'Törzsszám': ids, 'Név': names, 'FEOR': feor,
                            'Alaplétszám': amounts, 'Besorolás': np.where(feor.eq('8417'), 'Nemzetközis', 'Kihagyás'),
-                           'Kereset': earnings, 'Kihagyás oka': '', 'Megjegyzés': ''}).sort_values('Név').reset_index(drop=True)
+                           'Kereset': earnings, 'Kihagyás oka': '', 'Megjegyzés': ''})
+    result['Dátumhiba'] = ''
+    for source, target in [('jogvkezd', 'Belépés'), ('jogvvég', 'Kilépés')]:
+        result[target] = ''
+        if source in raw:
+            for i, value in raw[source].items():
+                parsed = employment_date(value)
+                if pd.notna(parsed):
+                    result.loc[i, target] = parsed.strftime('%Y-%m-%d')
+                elif pd.notna(value) and str(value).strip() not in ('', '0', '0.0'):
+                    result.loc[i, 'Dátumhiba'] += f'Hibás {target.lower()} dátum; '
+    result = result.sort_values('Név').reset_index(drop=True)
     return enforce_rules(result)
 
 
@@ -89,6 +157,8 @@ def enforce_rules(frame):
     if 'Megjegyzés' not in result:
         result['Megjegyzés'] = ''
     result['Megjegyzés'] = result['Megjegyzés'].fillna('').astype(str)
+    if (result['Kereset'].ne(0) & result['Besorolás'].eq('0 Ft kereset')).any():
+        raise ValueError('A 0 Ft kereset besorolás csak nulla keresethez tartozhat.')
     result['Kihagyás oka'] = np.where(zero, ZERO_REASON,
                                     np.where(result['Besorolás'].eq('Kihagyás'), 'Kézi kihagyás', ''))
     return result
@@ -116,6 +186,7 @@ def restore_categories(data, current, month=None):
     saved.loc[automatic_zero, 'Besorolás'] = None
     mapping = saved.set_index('Törzsszám')['Besorolás']
     result = current.copy()
+    result['Megjegyzés'] = ''
     defaults = pd.Series(np.where(result['FEOR'].eq('8417'), 'Nemzetközis', 'Kihagyás'), index=result.index)
     result['Besorolás'] = result['Törzsszám'].map(mapping).fillna(defaults)
     if month and 'Megjegyzés' in saved:
@@ -177,7 +248,7 @@ def excel_export(frame, month, source):
         settings.write_number(i, 5, row[5], money)
         settings.write_string(i, 7, row[7], note_format)
         settings.set_row(i, min(409, max(21, (len(row[7]) // 28 + 1) * 15)))
-    settings.data_validation(1, 4, len(frame), 4, {'validate': 'list', 'source': CATEGORIES + ['0 Ft kereset']})
+    settings.data_validation(1, 4, len(frame), 4, {'validate': 'list', 'source': CATEGORIES})
     settings.freeze_panes(1, 2)
     settings.autofilter(0, 0, len(frame), 7)
     headers = BASE_COLUMNS + ['N szorzó', 'B szorzó', 'Nemzetközi', 'Belföldi'] + EXTRA_COLUMNS
@@ -226,7 +297,7 @@ def excel_export(frame, month, source):
     for i, line in enumerate(['Mértékegység: fő. A súlyozott létszám nem személyek darabszáma.',
                              'Hibrid: 80% nemzetközi, 20% belföldi. Ónódi: 62,5%. 4-kezes: 75% nemzetközi.',
                              'A Besorolások lap szerkesztése frissíti a Részletezést és az Összesítést.',
-                             'A Kihagyottak lap az exportáláskori állapotot rögzíti.'], 17):
+                             'A csoportlapok az exportáláskori állapotot rögzítik; frissítéshez új export kell.'], 17):
         summary.merge_range(i, 0, i, 4, line, normal)
     summary.merge_range('A22:E22', 'Más FEOR-kódú dolgozó kézzel bevonható. 0 Ft kereset: kötelező kizárás.', normal)
     skipped.write_row(0, 0, BASE_COLUMNS + EXTRA_COLUMNS, head)
@@ -237,6 +308,36 @@ def excel_export(frame, month, source):
         skipped.write_number(i, 5, row[5], money)
         skipped.write_string(i, 7, row[7], note_format)
         skipped.set_row(i, min(409, max(21, (len(row[7]) // 28 + 1) * 15)))
+    for group_name, subset in grouped(frame):
+        sheet = book.add_worksheet(group_name)
+        sheet.set_tab_color(BLUE)
+        sheet.hide_gridlines(2)
+        sheet.set_column('A:A', 15, normal)
+        sheet.set_column('B:B', 32, normal)
+        sheet.set_column('C:G', 19, normal)
+        sheet.set_column('H:H', 40, note_format)
+        sheet.merge_range('A1:H1', f'{group_name} – {month} – exportáláskori állapot', head)
+        cols = ['Törzsszám', 'Név', 'FEOR', 'Besorolás', 'Alaplétszám', 'Nemzetközi', 'Belföldi', 'Megjegyzés']
+        sheet.write_row(2, 0, cols, head)
+        for i, (_, row) in enumerate(subset.iterrows(), 3):
+            for j, col in enumerate(cols):
+                sheet.write(i, j, row[col], number if 4 <= j <= 6 else note_format if j == 7 else normal)
+            sheet.set_row(i, min(409, max(21, (len(row['Megjegyzés']) // 35 + 1) * 15)))
+        sheet.freeze_panes(3, 2)
+        if len(subset):
+            sheet.autofilter(2, 0, len(subset) + 2, 7)
+    check = book.add_worksheet('Ellenőrzés')
+    check.set_column('A:F', 20, normal)
+    check.set_column('G:G', 90, note_format)
+    check.write('A1', 'Az ellenőrzés nem írja át az Agroorg alaplétszámát.', normal)
+    issues = audit(frame, month)
+    if not issues.empty:
+        check.write_row(2, 0, list(issues.columns), head)
+        for i, row in enumerate(issues.fillna('').itertuples(index=False, name=None), 3):
+            check.write_row(i, 0, row, note_format)
+            check.set_row(i, 60)
+    else:
+        check.write('A3', 'Nincs jelzett eltérés. Hiányzó dátumokból nem végezhető teljes időszak-ellenőrzés.', normal)
     book.close()
     return output.getvalue()
 
@@ -258,7 +359,7 @@ def pdf_export(frame, month, source):
                             topMargin=32, bottomMargin=32, title=f'Sofőrlétszám – {month}', author='Bábolna Sped Kft.')
     body = ParagraphStyle('body', fontName='Report', fontSize=8, leading=11, textColor=colors.HexColor(BLUE))
     title = ParagraphStyle('title', parent=body, fontName='ReportBold', fontSize=17, leading=22, spaceAfter=10)
-    heading = ParagraphStyle('heading', parent=body, fontName='ReportBold', fontSize=11, leading=15, spaceBefore=14, spaceAfter=7)
+    heading = ParagraphStyle('heading', parent=body, fontName='ReportBold', fontSize=11, leading=15, spaceBefore=14, spaceAfter=7, keepWithNext=True)
     white = ParagraphStyle('white', parent=body, fontName='ReportBold', textColor=colors.white)
     p = lambda text: Paragraph(escape(str(text)), body)
     fmt = lambda value: f'{value:.4f}'.replace('.', ',')
@@ -276,7 +377,7 @@ def pdf_export(frame, month, source):
                 f'Pozitív alaplétszámú besorolt: {(included & frame["Alaplétszám"].gt(0)).sum()} | Kihagyott: {(~included).sum()}'),
               p(f'0 kereset miatt kötelezően kihagyva: {frame["Kereset"].eq(0).sum()} személy. Más FEOR-kódú dolgozó is beszámítható kézi besorolással.'),
               p('A súlyozott létszám nem azonos a személyek számával. Hibrid: 80% nemzetközi, 20% belföldi. Ónódi: 62,5% nemzetközi. 4-kezes: 75% nemzetközi. A számítás a forrás létszámértékeiből történik, kerekítés csak a megjelenítésnél.')]
-    for label, subset in [('Besorolt személyek', frame[included]), ('Kihagyott személyek', frame[~included])]:
+    for label, subset in grouped(frame):
         story.append(Paragraph(label, heading))
         if subset.empty:
             story.append(p('Nincs.'))
@@ -299,6 +400,14 @@ def pdf_export(frame, month, source):
         for note_row in note_rows:
             t.setStyle(TableStyle([('SPAN', (1, note_row), (-1, note_row))]))
         story.append(t)
+    checks = audit(frame, month)
+    story.append(Paragraph('Időszak- és adatellenőrzés', heading))
+    story.append(p('A belépés és kilépés dátuma csak ellenőrzési adat. A számítás az Agroorg alaplétszámát használja, újabb időarányosítás nélkül.'))
+    if checks.empty:
+        story.append(p('Nincs jelzett eltérés. Hiányzó dátumok esetén a jogviszony időszaka nem ellenőrizhető teljesen.'))
+    else:
+        for _, check in checks.iterrows():
+            story.append(p(f'{check["Név"]} ({check["Törzsszám"]}): {check["Ellenőrzés"]}'))
     doc.build(story)
     return output.getvalue()
 
@@ -313,7 +422,7 @@ def main():
         st.info('Töltsd fel a havi Agroorg-exportot. Minden dolgozó megjelenik. A 8417 FEOR alapbesorolása Nemzetközis, más FEOR esetén Kihagyás. A 0 keresetűek láthatók maradnak, de kimaradnak a számításból.')
         return
     data = uploaded.getvalue()
-    fingerprint = sha256(b'v4-all-feor-notes' + data + uploaded.name.encode()).hexdigest()
+    fingerprint = sha256(b'v5-groups-audit' + data + uploaded.name.encode()).hexdigest()
     try:
         if st.session_state.get('source_id') != fingerprint:
             st.session_state['base'] = read_source(data, uploaded.name)
@@ -334,28 +443,58 @@ def main():
                 st.session_state['notes_month'] = month
                 st.session_state['revision'] += 1
                 st.success(f'{count} személy besorolása visszatöltve.')
-        st.subheader('Személyenkénti besorolás')
-        st.info('A 8417 FEOR-kódú dolgozók alapbesorolása Nemzetközis. Más FEOR esetén Kihagyás az alapérték: sofőrként végzett munka esetén válassz kategóriát. A 0 Ft keresetűek alább megjegyzéssel láthatók, és nem számítanak bele a létszámba.')
+        st.subheader('Dolgozók besorolás szerint')
+        st.caption('A módosítások után nyomd meg a Mentés és újraszámítás gombot. Az eredmények és exportok a mentett állapotot mutatják.')
         base = enforce_rules(st.session_state['base'])
         if st.session_state.get('notes_month') != month:
             base['Megjegyzés'] = ''
-        zero_rows = base.loc[base['Kereset'].eq(0)].copy()
-        active_rows = base.loc[base['Kereset'].ne(0)].copy()
-        edited_active = st.data_editor(active_rows.drop(columns=['Kihagyás oka', 'Megjegyzés']), hide_index=True, width='stretch', height=520,
-                               key=f'editor_{fingerprint}_{st.session_state["revision"]}',
-                               disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Kereset'],
-                               column_config={'Besorolás': st.column_config.SelectboxColumn('Besorolás', options=CATEGORIES, required=True),
-                                              'Alaplétszám': st.column_config.NumberColumn(format='%.4f'),
-                                              'Kereset': st.column_config.NumberColumn(format='%.2f')})
-        st.subheader(f'0 Ft kereset – {len(zero_rows)} személy')
-        if zero_rows.empty:
-            st.caption('Nincs 0 Ft keresetű dolgozó.')
-        else:
-            zero_rows = st.data_editor(zero_rows.drop(columns=['Kihagyás oka']), hide_index=True, width='stretch',
-                                      key=f'zero_{fingerprint}_{month}_{st.session_state["revision"]}',
-                                      disabled=BASE_COLUMNS + ['Kereset'],
-                                      column_config={'Megjegyzés': st.column_config.TextColumn('Megjegyzés', width='large', max_chars=500)})
-        edited = enforce_rules(pd.concat([edited_active, zero_rows]).sort_values('Név').reset_index(drop=True))
+        parts = []
+        with st.form('classification_form', enter_to_submit=False):
+            groups = grouped(base)
+            tabs = st.tabs([f'{label} ({len(subset)})' for label, subset in groups])
+            for tab, (label, subset) in zip(tabs, groups):
+                with tab:
+                    if subset.empty:
+                        st.caption('Nincs dolgozó ebben a csoportban.')
+                        continue
+                    active = subset.loc[subset['Kereset'].ne(0)]
+                    zero = subset.loc[subset['Kereset'].eq(0)]
+                    if not active.empty:
+                        parts.append(st.data_editor(active[BASE_COLUMNS + ['Kereset']], hide_index=True, width='stretch',
+                            key=f'group_{fingerprint}_{month}_{label}_{st.session_state["revision"]}',
+                            disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Kereset'],
+                            column_config={'Besorolás': st.column_config.SelectboxColumn(options=CATEGORIES, required=True),
+                                           'Alaplétszám': st.column_config.NumberColumn(format='%.4f')}))
+                    if not zero.empty:
+                        st.caption('0 Ft kereset: kötelező kihagyás. A megjegyzés szerkeszthető.')
+                        parts.append(st.data_editor(zero[BASE_COLUMNS + ['Kereset', 'Megjegyzés']], hide_index=True, width='stretch',
+                            key=f'zero_{fingerprint}_{month}_{st.session_state["revision"]}',
+                            disabled=BASE_COLUMNS + ['Kereset'],
+                            column_config={'Megjegyzés': st.column_config.TextColumn(width='large', max_chars=500)}))
+            submitted = st.form_submit_button('Mentés és újraszámítás')
+        if submitted:
+            updated = base.set_index('Törzsszám').copy()
+            for part in parts:
+                patch = part.set_index('Törzsszám')
+                for column in ['Besorolás', 'Megjegyzés']:
+                    if column in patch:
+                        updated.loc[patch.index, column] = patch[column]
+            st.session_state['base'] = enforce_rules(updated.reset_index())
+            st.session_state['notes_month'] = month
+            st.session_state['revision'] += 1
+            st.rerun()
+        edited = base
+        if suggested_month(uploaded.name).strftime('%Y-%m') != month:
+            st.warning('A kiválasztott hónap eltér a fájlnévből felajánlott hónaptól. A hónap átállítása nem számítja újra az Agroorg alaplétszámát.')
+        with st.expander('Hóközi be-/kilépés és lehetséges adathibák', expanded=False):
+            st.write('A számítás az Agroorg letsz mezőjét használja. Nem szorozzuk meg újra a hónapban töltött napok arányával. A naptári arány összehasonlító adat, nem automatikus korrekció.')
+            issues = audit(edited, month)
+            if issues.empty:
+                st.info('Nincs jelzett eltérés a rendelkezésre álló adatokban.')
+            else:
+                st.dataframe(issues, hide_index=True, width='stretch')
+            if edited['Belépés'].eq('').any():
+                st.caption('Egyes dolgozóknál hiányzik a belépési dátum; náluk az időszak ellenőrzése nem teljes.')
         calculated = calculate(edited)
         st.subheader('Eredmény')
         n, b, total = st.columns(3)
