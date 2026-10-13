@@ -26,13 +26,26 @@ def grouped(frame):
             for name in GROUPS]
 
 
+def empty_employment_date(value):
+    """Az Agroorg üres dátuma kötőjelekkel is érkezhet; ez nem hibás dátum."""
+    return pd.isna(value) or str(value).strip() in ('', '0', '0.0') or bool(re.fullmatch(r'[\s\-–—]+', str(value)))
+
+
 def employment_date(value):
-    if pd.isna(value) or str(value).strip() in ('', '0', '0.0'):
+    if empty_employment_date(value):
         return pd.NaT
     if isinstance(value, (int, float, np.number)):
         return pd.to_datetime(value, unit='D', origin='1899-12-30', errors='coerce')
     text = str(value).strip()
     return pd.to_datetime(text, dayfirst=not bool(re.match(r'^\d{4}[-./]', text)), errors='coerce')
+
+
+def monthly_entrants(frame, month):
+    """Kiegészítő nézet, nem külön számítási kategória; nem duplázza az összesítést."""
+    dates = frame.get('Belépés', pd.Series('', index=frame.index)).map(employment_date)
+    start = pd.Timestamp(month + '-01')
+    end = start + pd.offsets.MonthEnd(0)
+    return frame.loc[dates.ge(start) & dates.le(end)].sort_values(['Belépés', 'Név'])
 
 
 def audit(frame, month):
@@ -140,7 +153,7 @@ def read_source(data, filename):
                 parsed = employment_date(value)
                 if pd.notna(parsed):
                     result.loc[i, target] = parsed.strftime('%Y-%m-%d')
-                elif pd.notna(value) and str(value).strip() not in ('', '0', '0.0'):
+                elif not empty_employment_date(value):
                     result.loc[i, 'Dátumhiba'] += f'Hibás {target.lower()} dátum; '
     result = result.sort_values('Név').reset_index(drop=True)
     return enforce_rules(result)
@@ -338,6 +351,20 @@ def excel_export(frame, month, source):
             check.set_row(i, 60)
     else:
         check.write('A3', 'Nincs jelzett eltérés. Hiányzó dátumokból nem végezhető teljes időszak-ellenőrzés.', normal)
+    entrants = monthly_entrants(frame, month)
+    entrant_sheet = book.add_worksheet('Havi belépők')
+    entrant_sheet.hide_gridlines(2)
+    entrant_sheet.set_column('A:A', 15, normal)
+    entrant_sheet.set_column('B:B', 32, normal)
+    entrant_sheet.set_column('C:H', 19, normal)
+    entrant_sheet.merge_range('A1:H1', f'{month} – Havi belépők – kiegészítő nézet', head)
+    entrant_sheet.merge_range('A2:H2', 'Ezek a dolgozók a kategórialapokon is szerepelnek. Az összesítés csak egyszer számolja őket.', normal)
+    entrant_columns = ['Törzsszám', 'Név', 'Belépés', 'Kilépés', 'Besorolás', 'Alaplétszám', 'Nemzetközi', 'Belföldi']
+    entrant_sheet.write_row(3, 0, entrant_columns, head)
+    for i, (_, row) in enumerate(entrants.iterrows(), 4):
+        for j, col in enumerate(entrant_columns):
+            entrant_sheet.write(i, j, row.get(col, ''), number if j >= 5 else normal)
+    entrant_sheet.freeze_panes(4, 2)
     book.close()
     return output.getvalue()
 
@@ -377,6 +404,14 @@ def pdf_export(frame, month, source):
                 f'Pozitív alaplétszámú besorolt: {(included & frame["Alaplétszám"].gt(0)).sum()} | Kihagyott: {(~included).sum()}'),
               p(f'0 kereset miatt kötelezően kihagyva: {frame["Kereset"].eq(0).sum()} személy. Más FEOR-kódú dolgozó is beszámítható kézi besorolással.'),
               p('A súlyozott létszám nem azonos a személyek számával. Hibrid: 80% nemzetközi, 20% belföldi. Ónódi: 62,5% nemzetközi. 4-kezes: 75% nemzetközi. A számítás a forrás létszámértékeiből történik, kerekítés csak a megjelenítésnél.')]
+    entrants = monthly_entrants(frame, month)
+    story.append(Paragraph(f'Havi belépők ({len(entrants)} fő)', heading))
+    story.append(p('Kiegészítő nézet: a kategóriákban is szerepelnek, az összesítésben egyszer számítanak.'))
+    if entrants.empty:
+        story.append(p('Nincs belépő ebben a hónapban.'))
+    else:
+        for _, row in entrants.iterrows():
+            story.append(p(f'{row["Név"]} ({row["Törzsszám"]}) – belépés: {row["Belépés"]}; besorolás: {row["Besorolás"]}; alaplétszám: {fmt(row["Alaplétszám"])} fő.'))
     for label, subset in grouped(frame):
         story.append(Paragraph(label, heading))
         if subset.empty:
@@ -422,7 +457,7 @@ def main():
         st.info('Töltsd fel a havi Agroorg-exportot. Minden dolgozó megjelenik. A 8417 FEOR alapbesorolása Nemzetközis, más FEOR esetén Kihagyás. A 0 keresetűek láthatók maradnak, de kimaradnak a számításból.')
         return
     data = uploaded.getvalue()
-    fingerprint = sha256(b'v5-groups-audit' + data + uploaded.name.encode()).hexdigest()
+    fingerprint = sha256(b'v6-entrants-empty-exit' + data + uploaded.name.encode()).hexdigest()
     try:
         if st.session_state.get('source_id') != fingerprint:
             st.session_state['base'] = read_source(data, uploaded.name)
@@ -451,8 +486,15 @@ def main():
         parts = []
         with st.form('classification_form', enter_to_submit=False):
             groups = grouped(base)
-            tabs = st.tabs([f'{label} ({len(subset)})' for label, subset in groups])
-            for tab, (label, subset) in zip(tabs, groups):
+            entrants = monthly_entrants(base, month)
+            tabs = st.tabs([f'Havi belépők ({len(entrants)})'] + [f'{label} ({len(subset)})' for label, subset in groups])
+            with tabs[0]:
+                st.caption('A kiválasztott hónapban belépők, belépési dátum szerint. Besorolásuk a kategóriafüleken módosítható. Az összesítés egyszer számolja őket.')
+                if entrants.empty:
+                    st.info('Ebben a hónapban nincs belépő.')
+                else:
+                    st.dataframe(entrants[['Törzsszám', 'Név', 'Belépés', 'Kilépés', 'FEOR', 'Alaplétszám', 'Besorolás']], hide_index=True, width='stretch')
+            for tab, (label, subset) in zip(tabs[1:], groups):
                 with tab:
                     if subset.empty:
                         st.caption('Nincs dolgozó ebben a csoportban.')

@@ -55,3 +55,8 @@ Külön fül: Belföldes, Nemzetközis, Hibrid, Ónódi, 4-kezes, Nem számolt. 
 A PDF külön szakaszokat, az Excel külön csoportlapokat és Ellenőrzés munkalapot tartalmaz. A csoportlapok exportáláskori pillanatképek: Excelben végzett utólagos módosítás után frissítésükhöz visszatöltés és új export kell. A Részletezés és Összesítés képletekkel frissül.
 
 A másik hónapból visszatöltött adatok nem tarthatják meg az előző megjegyzéseket. A mentett felületi módosítások törzsszámhoz kapcsolódnak, így átsoroláskor nem kerülnek át másik személyre.
+
+
+## Havi belépők és nyitott jogviszony
+
+Az üres, kötőjeles vagy „- -” kilépési mező nyitott jogviszonyt jelent, nem dátumhibát. Csak a ténylegesen kitöltött kilépési dátumot ellenőrizzük. A kiválasztott hónap belépői külön Havi belépők fülön jelennek meg, belépési dátum szerinti sorrendben. A nézet az Excelben külön munkalapként, a PDF-ben külön szakaszként is szerepel. Ez kiegészítő nézet: a dolgozók a kategóriájukban is megjelennek, de az összesítés egyszer számolja őket.
