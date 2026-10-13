@@ -489,11 +489,25 @@ def main():
             entrants = monthly_entrants(base, month)
             tabs = st.tabs([f'Havi belépők ({len(entrants)})'] + [f'{label} ({len(subset)})' for label, subset in groups])
             with tabs[0]:
-                st.caption('A kiválasztott hónapban belépők, belépési dátum szerint. Besorolásuk a kategóriafüleken módosítható. Az összesítés egyszer számolja őket.')
+                st.caption('Itt is módosíthatod a besorolást, majd nyomd meg a Mentés és újraszámítás gombot. Az összesítés egyszer számolja a belépőket.')
                 if entrants.empty:
                     st.info('Ebben a hónapban nincs belépő.')
                 else:
-                    st.dataframe(entrants[['Törzsszám', 'Név', 'Belépés', 'Kilépés', 'FEOR', 'Alaplétszám', 'Besorolás']], hide_index=True, width='stretch')
+                    active_entrants = entrants.loc[entrants['Kereset'].ne(0)]
+                    zero_entrants = entrants.loc[entrants['Kereset'].eq(0)]
+                    columns = ['Törzsszám', 'Név', 'Belépés', 'Kilépés', 'FEOR', 'Alaplétszám', 'Kereset', 'Besorolás']
+                    if not active_entrants.empty:
+                        parts.append(st.data_editor(active_entrants[columns], hide_index=True, width='stretch',
+                            key=f'entrants_{fingerprint}_{month}_{st.session_state["revision"]}',
+                            disabled=[column for column in columns if column != 'Besorolás'],
+                            column_config={'Besorolás': st.column_config.SelectboxColumn(options=CATEGORIES, required=True),
+                                           'Alaplétszám': st.column_config.NumberColumn(format='%.4f')}))
+                    if not zero_entrants.empty:
+                        st.caption('0 Ft kereset: kötelező kihagyás. A megjegyzés szerkeszthető.')
+                        parts.append(st.data_editor(zero_entrants[columns + ['Megjegyzés']], hide_index=True, width='stretch',
+                            key=f'entrants_zero_{fingerprint}_{month}_{st.session_state["revision"]}',
+                            disabled=columns,
+                            column_config={'Megjegyzés': st.column_config.TextColumn(width='large', max_chars=500)}))
             for tab, (label, subset) in zip(tabs[1:], groups):
                 with tab:
                     if subset.empty:
@@ -516,11 +530,22 @@ def main():
             submitted = st.form_submit_button('Mentés és újraszámítás')
         if submitted:
             updated = base.set_index('Törzsszám').copy()
+            changes = {}
             for part in parts:
                 patch = part.set_index('Törzsszám')
                 for column in ['Besorolás', 'Megjegyzés']:
                     if column in patch:
-                        updated.loc[patch.index, column] = patch[column]
+                        # Only changed cells: an unchanged duplicate view must not
+                        # overwrite an edit made on the monthly entrants tab.
+                        for employee, value in patch[column].items():
+                            if value == updated.loc[employee, column]:
+                                continue
+                            cell = (employee, column)
+                            if cell in changes and changes[cell] != value:
+                                raise ValueError('Ugyanazt a mezőt két fülön eltérően módosítottad. Állítsd azonosra a Havi belépők és a kategóriafül értékét, majd ments újra.')
+                            changes[cell] = value
+            for (employee, column), value in changes.items():
+                updated.loc[employee, column] = value
             st.session_state['base'] = enforce_rules(updated.reset_index())
             st.session_state['notes_month'] = month
             st.session_state['revision'] += 1

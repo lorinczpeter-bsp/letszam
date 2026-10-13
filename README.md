@@ -16,7 +16,7 @@ Streamlit Community Cloud esetén a teljes csomagot töltsd fel a repository-ba,
 3. A 0 keresetűek külön listában jelennek meg. Besorolásuk mindig „0 Ft kereset”, nem módosítható, nem számítanak bele a létszámba. A Megjegyzés mezőben rögzíthető a távollét oka, legfeljebb 500 karakterrel. Az alkalmazás nem következtet a távollét okára.
 4. A korábbi Excel-exportból törzsszám alapján visszatölthetők a besorolások. A régi „Váltó / Ónódi” értéket „Ónódi”-ként veszi át. Az aktuális hónap nulla keresete mindig felülírja a visszatöltött besorolást. Korábbi automatikus nullás kizárás után az új hónap alapbesorolása a FEOR alapján áll vissza.
 5. A megjegyzések az Excel-exportban megmaradnak, és ugyanarra a hónapra visszatölthetők. Más hónap megjegyzését nem veszi át a program.
-6. A csoportfüleken módosítsd a besorolásokat, majd kattints a Mentés és újraszámítás gombra. Az Excel- és PDF-export mindig a mentett állapotból készül.
+6. A Havi belépők fülön vagy a csoportfüleken módosítsd a besorolásokat, majd kattints a Mentés és újraszámítás gombra. Az Excel- és PDF-export mindig a mentett állapotból készül.
 
 ## Számítás
 
@@ -60,3 +60,5 @@ A másik hónapból visszatöltött adatok nem tarthatják meg az előző megjeg
 ## Havi belépők és nyitott jogviszony
 
 Az üres, kötőjeles vagy „- -” kilépési mező nyitott jogviszonyt jelent, nem dátumhibát. Csak a ténylegesen kitöltött kilépési dátumot ellenőrizzük. A kiválasztott hónap belépői külön Havi belépők fülön jelennek meg, belépési dátum szerinti sorrendben. A nézet az Excelben külön munkalapként, a PDF-ben külön szakaszként is szerepel. Ez kiegészítő nézet: a dolgozók a kategóriájukban is megjelennek, de az összesítés egyszer számolja őket.
+
+A Havi belépők fülön közvetlenül szerkeszthető a besorolás. A nulla keresetű belépőknél csak a megjegyzés módosítható. Mentés után a kategóriafülek és exportok is az új besorolást mutatják. Ha egy mezőt két fülön eltérően módosítasz, a program jelzi az ütközést; állítsd azonosra a két értéket és ments újra.
