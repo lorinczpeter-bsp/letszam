@@ -62,3 +62,13 @@ A másik hónapból visszatöltött adatok nem tarthatják meg az előző megjeg
 Az üres, kötőjeles vagy „- -” kilépési mező nyitott jogviszonyt jelent, nem dátumhibát. Csak a ténylegesen kitöltött kilépési dátumot ellenőrizzük. A kiválasztott hónap belépői külön Havi belépők fülön jelennek meg, belépési dátum szerinti sorrendben. A nézet az Excelben külön munkalapként, a PDF-ben külön szakaszként is szerepel. Ez kiegészítő nézet: a dolgozók a kategóriájukban is megjelennek, de az összesítés egyszer számolja őket.
 
 A Havi belépők fülön közvetlenül szerkeszthető a besorolás. A nulla keresetű belépőknél csak a megjegyzés módosítható. Mentés után a kategóriafülek és exportok is az új besorolást mutatják. Ha egy mezőt két fülön eltérően módosítasz, a program jelzi az ütközést; állítsd azonosra a két értéket és ments újra.
+
+## Kategóriák beállítása
+
+A Beállítások – kategóriák és arányok panel az Agroorg-fájl feltöltése előtt is elérhető. A Nemzetközi % és Belföldi % oszlop a kategória alaplétszámának hozzájárulását határozza meg: 75% 0,75-ös szorzót jelent. Az összeget nem kell 100%-ra kiegészíteni. Véges, nemnegatív értékek használhatók.
+
+Új kategóriát az üres alsó sorban adhatsz hozzá. A Kategóriák mentése után megjelenik a besorolások között, külön csoportfület és exportot kap. Használt kategóriát csak a dolgozók átsorolása után lehet törölni vagy átnevezni. A Nemzetközis alapértelmezett név és a Kihagyás 0%-os szabály védett; a 0 Ft kereset továbbra is kötelező automatikus kizárás. A nevek az Excel-munkalapok szabályait követik (legfeljebb 31 karakter).
+
+Az Excel Kategóriák lapja megőrzi a beállításokat; a Besorolások visszatöltése a kategóriákat és arányokat is visszaállítja. Régi exporthoz a korábbi alapértelmezett arányokat használja. A PDF felsorolja az alkalmazott arányokat. Az Excel számítási képletei is a Kategóriák lapról veszik a szorzókat. Az Excelben utólag módosított csoportlapok továbbra is pillanatképek.
+
+A beállítások a böngésző aktuális munkamenetében érvényesek; tartós megőrzésükhöz töltsd le a havi Excel-exportot és később töltsd vissza.

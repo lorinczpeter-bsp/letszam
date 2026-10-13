@@ -20,10 +20,54 @@ ZERO_REASON = '0 kereset miatt kihagyva'
 GROUPS = ['Belföldes', 'Nemzetközis', 'Hibrid', 'Ónódi', '4-kezes', 'Nem számolt']
 
 
-def grouped(frame):
+CONFIG_COLUMNS = ['Kategória', 'Nemzetközi %', 'Belföldi %']
+RESERVED_SHEETS = {'összesítés', 'részletezés', 'kihagyottak', 'besorolások', 'ellenőrzés', 'havi belépők', 'kategóriák', 'nem számolt', '0 ft kereset', 'history'}
+
+
+def default_config():
+    return pd.DataFrame([[name, FACTORS[name][0] * 100, FACTORS[name][1] * 100]
+                         for name in CATEGORIES], columns=CONFIG_COLUMNS)
+
+
+def validate_config(config, used=()):
+    result = config[CONFIG_COLUMNS].copy()
+    result['Kategória'] = result['Kategória'].fillna('').astype(str).str.strip()
+    names = result['Kategória']
+    if names.eq('').any() or names.str.casefold().duplicated().any():
+        raise ValueError('A kategórianevek legyenek kitöltve és egyediek.')
+    for name in names:
+        if len(name) > 31 or re.search(r"[\[\]:*?/\\]", name) or name.startswith("'") or name.endswith("'") or name.casefold() in RESERVED_SHEETS:
+            raise ValueError(f'Nem használható kategórianév: {name}. Legfeljebb 31 karakter, Excelben is érvényes név szükséges.')
+    if not {'Nemzetközis', 'Kihagyás'}.issubset(names):
+        raise ValueError('A Nemzetközis és Kihagyás alapértelmezett kategória nem törölhető vagy nevezhető át.')
+    missing = set(used) - set(names) - {'0 Ft kereset'}
+    if missing:
+        raise ValueError('Előbb sorold át az érintett dolgozókat, majd töröld vagy nevezd át a kategóriát: ' + ', '.join(sorted(missing)))
+    for col in CONFIG_COLUMNS[1:]:
+        result[col] = pd.to_numeric(result[col], errors='coerce')
+        if result[col].isna().any() or not np.isfinite(result[col]).all() or result[col].lt(0).any():
+            raise ValueError('A százalékok nemnegatív, véges számok legyenek.')
+    if result.loc[names.eq('Kihagyás'), CONFIG_COLUMNS[1:]].ne(0).any().any():
+        raise ValueError('A Kihagyás szorzói kötelezően 0%-osak.')
+    return result.reset_index(drop=True)
+
+
+def factors_for(config=None):
+    rows = validate_config(default_config() if config is None else config)
+    return {**{row['Kategória']: (row['Nemzetközi %']/100, row['Belföldi %']/100)
+               for _, row in rows.iterrows()}, '0 Ft kereset': (0., 0.)}
+
+
+def restore_config(data):
+    book = pd.ExcelFile(BytesIO(data))
+    return validate_config(pd.read_excel(book, sheet_name='Kategóriák')) if 'Kategóriák' in book.sheet_names else default_config()
+
+
+def grouped(frame, config=None):
     counted = ~frame['Besorolás'].isin(EXCLUDED) & frame['Alaplétszám'].gt(0)
     return [(name, frame.loc[~counted if name == 'Nem számolt' else counted & frame['Besorolás'].eq(name)])
-            for name in GROUPS]
+            for name in ([n for n in GROUPS[:-1] if n in factors_for(config)] +
+                         [n for n in factors_for(config) if n not in GROUPS and n not in EXCLUDED] + ['Nem számolt'])]
 
 
 def empty_employment_date(value):
@@ -182,7 +226,7 @@ def suggested_month(filename):
     return date(int(matches[-1][0]), int(matches[-1][1]), 1) if matches else date.today().replace(day=1)
 
 
-def restore_categories(data, current, month=None):
+def restore_categories(data, current, month=None, config=None):
     """A besorolás átvihető másik hónapra, a megjegyzés csak ugyanarra a hónapra."""
     saved = pd.read_excel(BytesIO(data), sheet_name='Besorolások', dtype={'Törzsszám': str})
     if not {'Törzsszám', 'Besorolás'}.issubset(saved.columns):
@@ -191,7 +235,7 @@ def restore_categories(data, current, month=None):
     if saved['Törzsszám'].eq('').any() or saved['Törzsszám'].duplicated().any():
         raise ValueError('A mentett besorolások törzsszámai hiányosak vagy ismétlődnek.')
     saved['Besorolás'] = saved['Besorolás'].replace({'Váltó / Ónódi': 'Ónódi'})
-    if not saved['Besorolás'].isin(CATEGORIES + ['0 Ft kereset']).all():
+    if not saved['Besorolás'].isin(factors_for(config)).all():
         raise ValueError('Ismeretlen kategória található a mentett besorolásokban.')
     automatic_zero = saved['Besorolás'].eq('0 Ft kereset')
     if 'Kihagyás oka' in saved:
@@ -211,22 +255,23 @@ def restore_categories(data, current, month=None):
     return result, int(result['Törzsszám'].isin(mapping.index).sum())
 
 
-def calculate(frame):
+def calculate(frame, config=None):
+    factors = factors_for(config)
     frame = enforce_rules(frame)
-    if not frame['Besorolás'].isin(CATEGORIES + ['0 Ft kereset']).all():
+    if not frame['Besorolás'].isin(factors).all():
         raise ValueError('Minden személynél válassz érvényes besorolást.')
     result = frame.copy()
-    result['N szorzó'] = result['Besorolás'].map(lambda c: FACTORS[c][0])
-    result['B szorzó'] = result['Besorolás'].map(lambda c: FACTORS[c][1])
+    result['N szorzó'] = result['Besorolás'].map(lambda c: factors[c][0])
+    result['B szorzó'] = result['Besorolás'].map(lambda c: factors[c][1])
     result['Nemzetközi'] = result['Alaplétszám'] * result['N szorzó']
     result['Belföldi'] = result['Alaplétszám'] * result['B szorzó']
     return result
 
 
-def excel_export(frame, month, source):
+def excel_export(frame, month, source, config=None):
     """Az alkalmazás futás közben készített Excel-exportja képletekkel és gyorsítótárazott eredménnyel."""
     import xlsxwriter
-    frame = calculate(frame)
+    frame = calculate(frame, config)
     output = BytesIO()
     book = xlsxwriter.Workbook(output, {'in_memory': True, 'strings_to_formulas': False,
                                       'strings_to_urls': False})
@@ -261,7 +306,18 @@ def excel_export(frame, month, source):
         settings.write_number(i, 5, row[5], money)
         settings.write_string(i, 7, row[7], note_format)
         settings.set_row(i, min(409, max(21, (len(row[7]) // 28 + 1) * 15)))
-    settings.data_validation(1, 4, len(frame), 4, {'validate': 'list', 'source': CATEGORIES})
+    config = validate_config(default_config() if config is None else config)
+    category_sheet = book.add_worksheet('Kategóriák')
+    category_sheet.hide_gridlines(2)
+    category_sheet.set_column('A:A', 32, normal)
+    category_sheet.set_column('B:C', 20, number)
+    category_sheet.write_row(0, 0, CONFIG_COLUMNS, head)
+    for i, row in enumerate(config.itertuples(index=False, name=None), 1):
+        category_sheet.write_row(i, 0, row, normal)
+    category_sheet.freeze_panes(1, 1)
+    category_end = len(config) + 1
+    book.define_name('Kategoriak', f"='Kategóriák'!$A$2:$A${category_end}")
+    settings.data_validation(1, 4, len(frame), 4, {'validate': 'list', 'source': '=Kategoriak'})
     settings.freeze_panes(1, 2)
     settings.autofilter(0, 0, len(frame), 7)
     headers = BASE_COLUMNS + ['N szorzó', 'B szorzó', 'Nemzetközi', 'Belföldi'] + EXTRA_COLUMNS
@@ -279,8 +335,9 @@ def excel_export(frame, month, source):
         detail.write_formula(i, 10, f'IF(J{r}=0,"{ZERO_REASON}",IF(E{r}="Kihagyás","Kézi kihagyás",""))', normal, row['Kihagyás oka'])
         detail.write_formula(i, 11, f"=IF('Besorolások'!H{r}=\"\",\"\",'Besorolások'!H{r})", note_format, row['Megjegyzés'])
         detail.set_row(i, min(409, max(21, (len(row["Megjegyzés"]) // 28 + 1) * 15)))
-        detail.write_formula(i, 5, f'IF(E{r}="Nemzetközis",1,IF(E{r}="Hibrid",0.8,IF(E{r}="Ónódi",0.625,IF(E{r}="4-kezes",0.75,0))))', number, row['N szorzó'])
-        detail.write_formula(i, 6, f'IF(E{r}="Belföldes",1,IF(E{r}="Hibrid",0.2,0))', number, row['B szorzó'])
+        for j, factor_col in [(5, 2), (6, 3)]:
+            formula = f'IF(OR(E{r}="0 Ft kereset",E{r}="Kihagyás"),0,IFERROR(VLOOKUP(E{r},\'Kategóriák\'!$A$2:$C${category_end},{factor_col},FALSE)/100,0))'
+            detail.write_formula(i, j, formula, number, row['N szorzó' if j == 5 else 'B szorzó'])
         detail.write_formula(i, 7, f'D{r}*F{r}', number, row['Nemzetközi'])
         detail.write_formula(i, 8, f'D{r}*G{r}', number, row['Belföldi'])
     detail.freeze_panes(1, 2)
@@ -308,7 +365,7 @@ def excel_export(frame, month, source):
     summary.write('A16', 'Ebből 0 kereset miatt kihagyva', normal)
     summary.write_formula('B16', f'COUNTIF(\'Részletezés\'!J2:J{end},0)', normal, int(frame['Kereset'].eq(0).sum()))
     for i, line in enumerate(['Mértékegység: fő. A súlyozott létszám nem személyek darabszáma.',
-                             'Hibrid: 80% nemzetközi, 20% belföldi. Ónódi: 62,5%. 4-kezes: 75% nemzetközi.',
+                             'Az alkalmazott százalékokat a Kategóriák munkalap tartalmazza.',
                              'A Besorolások lap szerkesztése frissíti a Részletezést és az Összesítést.',
                              'A csoportlapok az exportáláskori állapotot rögzítik; frissítéshez új export kell.'], 17):
         summary.merge_range(i, 0, i, 4, line, normal)
@@ -321,7 +378,7 @@ def excel_export(frame, month, source):
         skipped.write_number(i, 5, row[5], money)
         skipped.write_string(i, 7, row[7], note_format)
         skipped.set_row(i, min(409, max(21, (len(row[7]) // 28 + 1) * 15)))
-    for group_name, subset in grouped(frame):
+    for group_name, subset in grouped(frame, config):
         sheet = book.add_worksheet(group_name)
         sheet.set_tab_color(BLUE)
         sheet.hide_gridlines(2)
@@ -369,7 +426,7 @@ def excel_export(frame, month, source):
     return output.getvalue()
 
 
-def pdf_export(frame, month, source):
+def pdf_export(frame, month, source, config=None):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
@@ -380,7 +437,7 @@ def pdf_export(frame, month, source):
     for name, filename in [('Report', 'DejaVuSans.ttf'), ('ReportBold', 'DejaVuSans-Bold.ttf')]:
         if name not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont(name, str(fonts / filename)))
-    frame = calculate(frame)
+    frame = calculate(frame, config)
     output = BytesIO()
     doc = SimpleDocTemplate(output, pagesize=A4, leftMargin=32, rightMargin=32,
                             topMargin=32, bottomMargin=32, title=f'Sofőrlétszám – {month}', author='Bábolna Sped Kft.')
@@ -403,7 +460,7 @@ def pdf_export(frame, month, source):
     story += [p(f'Személyek a forrásban: {len(frame)} | Besorolt: {included.sum()} | '
                 f'Pozitív alaplétszámú besorolt: {(included & frame["Alaplétszám"].gt(0)).sum()} | Kihagyott: {(~included).sum()}'),
               p(f'0 kereset miatt kötelezően kihagyva: {frame["Kereset"].eq(0).sum()} személy. Más FEOR-kódú dolgozó is beszámítható kézi besorolással.'),
-              p('A súlyozott létszám nem azonos a személyek számával. Hibrid: 80% nemzetközi, 20% belföldi. Ónódi: 62,5% nemzetközi. 4-kezes: 75% nemzetközi. A számítás a forrás létszámértékeiből történik, kerekítés csak a megjelenítésnél.')]
+              p('A súlyozott létszám nem azonos a személyek számával. A számítás a forrás létszámértékeit és a kimutatásban rögzített kategóriaarányokat használja; kerekítés csak a megjelenítésnél.')]
     entrants = monthly_entrants(frame, month)
     story.append(Paragraph(f'Havi belépők ({len(entrants)} fő)', heading))
     story.append(p('Kiegészítő nézet: a kategóriákban is szerepelnek, az összesítésben egyszer számítanak.'))
@@ -412,7 +469,7 @@ def pdf_export(frame, month, source):
     else:
         for _, row in entrants.iterrows():
             story.append(p(f'{row["Név"]} ({row["Törzsszám"]}) – belépés: {row["Belépés"]}; besorolás: {row["Besorolás"]}; alaplétszám: {fmt(row["Alaplétszám"])} fő.'))
-    for label, subset in grouped(frame):
+    for label, subset in grouped(frame, config):
         story.append(Paragraph(label, heading))
         if subset.empty:
             story.append(p('Nincs.'))
@@ -435,6 +492,9 @@ def pdf_export(frame, month, source):
         for note_row in note_rows:
             t.setStyle(TableStyle([('SPAN', (1, note_row), (-1, note_row))]))
         story.append(t)
+    story.append(Paragraph('Kategóriák és számítási arányok', heading))
+    for name, (n, b) in factors_for(config).items():
+        story.append(p(f'{name}: {n*100:g}% nemzetközi, {b*100:g}% belföldi.'))
     checks = audit(frame, month)
     story.append(Paragraph('Időszak- és adatellenőrzés', heading))
     story.append(p('A belépés és kilépés dátuma csak ellenőrzési adat. A számítás az Agroorg alaplétszámát használja, újabb időarányosítás nélkül.'))
@@ -452,6 +512,27 @@ def main():
     st.set_page_config(page_title='Bábolna Sped | Sofőrlétszám', layout='wide')
     st.title('Sofőrlétszám')
     st.caption('Bábolna Sped Kft. • Agroorg havi létszámkimutatás')
+    if 'category_config' not in st.session_state:
+        st.session_state['category_config'] = default_config()
+        st.session_state['config_revision'] = 0
+    with st.expander('Beállítások – kategóriák és arányok', expanded=False):
+        st.caption('100% = 1 fő, 75% = 0,75 fő az alaplétszám minden 1 főjére. A két arány összege nem kötelezően 100%. Új kategóriát az üres alsó sorban adhatsz hozzá. Használt kategória törlése vagy átnevezése előtt sorold át a dolgozókat. A Nemzetközis név és a Kihagyás szabály védett.')
+        with st.form('settings_form'):
+            settings_config = st.data_editor(st.session_state['category_config'], hide_index=True, width='stretch', num_rows='dynamic',
+                key=f'category_settings_{st.session_state["config_revision"]}',
+                column_config={col: st.column_config.NumberColumn(min_value=0., step=0.1, format='%.2f', required=True) for col in CONFIG_COLUMNS[1:]})
+            save_settings = st.form_submit_button('Kategóriák mentése')
+        if save_settings:
+            try:
+                used = st.session_state['base']['Besorolás'] if 'base' in st.session_state else []
+                st.session_state['category_config'] = validate_config(settings_config, used)
+                st.session_state['config_revision'] += 1
+                st.session_state['revision'] = st.session_state.get('revision', 0) + 1
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+    config = st.session_state['category_config']
+    categories = config['Kategória'].tolist()
     uploaded = st.file_uploader('Agroorg-export feltöltése', type=['xls', 'xlsx', 'csv'])
     if uploaded is None:
         st.info('Töltsd fel a havi Agroorg-exportot. Minden dolgozó megjelenik. A 8417 FEOR alapbesorolása Nemzetközis, más FEOR esetén Kihagyás. A 0 keresetűek láthatók maradnak, de kimaradnak a számításból.')
@@ -473,7 +554,12 @@ def main():
             st.write('A besorolásokat törzsszám alapján vesszük át. Az aktuális havi 0 Ft kereset mindig kötelező kizárás. A megjegyzések csak azonos elszámolási hónapból tölthetők vissza.')
             previous = st.file_uploader('Korábbi Excel-export', type=['xlsx'], key='previous')
             if st.button('Besorolások visszatöltése', disabled=previous is None):
-                restored, count = restore_categories(previous.getvalue(), st.session_state['base'], month)
+                loaded_config = restore_config(previous.getvalue())
+                restored, count = restore_categories(previous.getvalue(), st.session_state['base'], month, loaded_config)
+                st.session_state['category_config'] = loaded_config
+                st.session_state['config_revision'] += 1
+                config = loaded_config
+                categories = config['Kategória'].tolist()
                 st.session_state['base'] = restored
                 st.session_state['notes_month'] = month
                 st.session_state['revision'] += 1
@@ -485,7 +571,7 @@ def main():
             base['Megjegyzés'] = ''
         parts = []
         with st.form('classification_form', enter_to_submit=False):
-            groups = grouped(base)
+            groups = grouped(base, config)
             entrants = monthly_entrants(base, month)
             tabs = st.tabs([f'Havi belépők ({len(entrants)})'] + [f'{label} ({len(subset)})' for label, subset in groups])
             with tabs[0]:
@@ -500,7 +586,7 @@ def main():
                         parts.append(st.data_editor(active_entrants[columns], hide_index=True, width='stretch',
                             key=f'entrants_{fingerprint}_{month}_{st.session_state["revision"]}',
                             disabled=[column for column in columns if column != 'Besorolás'],
-                            column_config={'Besorolás': st.column_config.SelectboxColumn(options=CATEGORIES, required=True),
+                            column_config={'Besorolás': st.column_config.SelectboxColumn(options=categories, required=True),
                                            'Alaplétszám': st.column_config.NumberColumn(format='%.4f')}))
                     if not zero_entrants.empty:
                         st.caption('0 Ft kereset: kötelező kihagyás. A megjegyzés szerkeszthető.')
@@ -519,7 +605,7 @@ def main():
                         parts.append(st.data_editor(active[BASE_COLUMNS + ['Kereset']], hide_index=True, width='stretch',
                             key=f'group_{fingerprint}_{month}_{label}_{st.session_state["revision"]}',
                             disabled=['Törzsszám', 'Név', 'FEOR', 'Alaplétszám', 'Kereset'],
-                            column_config={'Besorolás': st.column_config.SelectboxColumn(options=CATEGORIES, required=True),
+                            column_config={'Besorolás': st.column_config.SelectboxColumn(options=categories, required=True),
                                            'Alaplétszám': st.column_config.NumberColumn(format='%.4f')}))
                     if not zero.empty:
                         st.caption('0 Ft kereset: kötelező kihagyás. A megjegyzés szerkeszthető.')
@@ -562,7 +648,7 @@ def main():
                 st.dataframe(issues, hide_index=True, width='stretch')
             if edited['Belépés'].eq('').any():
                 st.caption('Egyes dolgozóknál hiányzik a belépési dátum; náluk az időszak ellenőrzése nem teljes.')
-        calculated = calculate(edited)
+        calculated = calculate(edited, config)
         st.subheader('Eredmény')
         n, b, total = st.columns(3)
         n.metric('Nemzetközi súlyozott létszám', f'{calculated["Nemzetközi"].sum():.4f}'.replace('.', ',') + ' fő')
@@ -571,16 +657,16 @@ def main():
         included = ~edited['Besorolás'].isin(EXCLUDED)
         st.caption(f'Forrás: {len(edited)} személy • Besorolt: {included.sum()} • Pozitív alaplétszámú besorolt: '
                    f'{(included & edited["Alaplétszám"].gt(0)).sum()} • Kihagyott: {(~included).sum()}')
-        st.caption('Hibrid: 80% nemzetközi, 20% belföldi. Ónódi: 62,5% nemzetközi. 4-kezes: 75% nemzetközi. A köztes értékeket nem kerekítjük.')
+        st.caption('A számítás a mentett kategóriaarányokat használja. A köztes értékeket nem kerekítjük.')
         with st.expander('Számítás részletei'):
             st.dataframe(calculated, hide_index=True, width='stretch')
         st.subheader('Export')
         # Mindkét export az aktuális felületi állapotból készül.
         left, right = st.columns(2)
-        left.download_button('Excel letöltése', excel_export(edited, month, uploaded.name),
+        left.download_button('Excel letöltése', excel_export(edited, month, uploaded.name, config),
                              file_name=f'letszam_{month}.xlsx',
                              mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        right.download_button('PDF letöltése', pdf_export(edited, month, uploaded.name),
+        right.download_button('PDF letöltése', pdf_export(edited, month, uploaded.name, config),
                               file_name=f'letszam_{month}.pdf', mime='application/pdf')
         st.caption('A besorolásokat az Excel-export őrzi meg. A böngésző bezárása után ebből tölthetők vissza.')
     except Exception as error:
